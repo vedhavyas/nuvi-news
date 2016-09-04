@@ -1,0 +1,22 @@
+{
+	"ImportPath": "github.com/vedhavyas/nuvi-news",
+	"GoVersion": "go1.7",
+	"GodepVersion": "v74",
+	"Packages": [
+		"./..."
+	],
+	"Deps": [
+		{
+			"ImportPath": "github.com/keimoon/gore",
+			"Rev": "1ac8b93b5fdb62ebedcf0aee192df6b16abb4fc5"
+		},
+		{
+			"ImportPath": "golang.org/x/net/html",
+			"Rev": "ac47690cb8dd9b1093dbc083efb98cd41f05d9bd"
+		},
+		{
+			"ImportPath": "golang.org/x/net/html/atom",
+			"Rev": "ac47690cb8dd9b1093dbc083efb98cd41f05d9bd"
+		}
+	]
+}

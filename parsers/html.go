@@ -1,43 +1,42 @@
 package parsers
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
-
-	"fmt"
 
 	"golang.org/x/net/html"
 )
 
 //GetZIPLinksFromURL parses html from the URL and return a list of names of file under <a> tag available in depth 1
-func GetZIPLinksFromURL(url string) ([]string, error) {
+func GetZIPLinksFromURL(url string) (map[string]string, error) {
 	return getLinks(url, ".zip")
 }
 
-func getLinks(url, fileFormat string) ([]string, error) {
+func getLinks(url, fileFormat string) (map[string]string, error) {
 	response, err := http.Get(url)
 	if err != nil {
-		return []string{}, err
+		return nil, err
 	}
 
 	doc, err := html.Parse(response.Body)
 	if err != nil {
-		return []string{}, err
+		return nil, err
 	}
-	return parseHTML(response.Request.URL.String(), doc, []string{}, fileFormat), nil
+	return parseHTML(response.Request.URL.String(), doc, make(map[string]string), fileFormat), nil
 }
 
-func parseHTML(baseURL string, content *html.Node, linkFiles []string, fileFormat string) []string {
+func parseHTML(baseURL string, content *html.Node, linksMap map[string]string, fileFormat string) map[string]string {
 	if content.Type == html.ElementNode && content.Data == "a" {
 		file := content.Attr[0].Val
 		// this is <a>
 		if strings.HasSuffix(file, fileFormat) {
-			linkFiles = append(linkFiles, fmt.Sprintf("%s/%s", baseURL, file))
+			linksMap[file] = fmt.Sprintf("%s/%s", baseURL, file)
 		}
 	}
 	for c := content.FirstChild; c != nil; c = c.NextSibling {
-		linkFiles = parseHTML(baseURL, c, linkFiles, fileFormat)
+		linksMap = parseHTML(baseURL, c, linksMap, fileFormat)
 	}
 
-	return linkFiles
+	return linksMap
 }

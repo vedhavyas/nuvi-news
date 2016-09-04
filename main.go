@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -8,54 +10,79 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-
 	"strings"
+	"sync"
 
 	"github.com/keimoon/gore"
+	"github.com/vedhavyas/nuvi-news/parsers"
 	"github.com/vedhavyas/nuvi-news/util"
 )
 
-var redisPool gore.Pool
+var redisPool = &gore.Pool{
+	InitialConn: 10,
+	MaximumConn: 20,
+}
+
+const NEWS_LIST = "NEWS_XML"
+const PROC_ZIPS = "PROCESSED_ZIPS"
 
 func main() {
-	//url := "http://bitly.com/nuvi-plz"
-	//
-	//fileList, err := parsers.GetZIPLinksFromURL(url)
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
+	log.SetFlags(log.Lshortfile | log.Ltime)
+	url := flag.String("URL", "http://bitly.com/nuvi-plz", "")
+	redisAddr := flag.String("redis-url", "localhost:6379", "redis-url")
+	flag.Parse()
 
-	//for _, file := range fileList {
-	//	fmt.Println(file)
-	//}
-
-	//fileURL := "http://feed.omgili.com/5Rh5AMTrc4Pv/mainstream/posts/1472752689118.zip"
-	//splitData := strings.Split(fileURL, "/")
-	//fileName := splitData[len(splitData)-1]
-	//if err := downloadAndProcessFile(fileURL, fileName); err != nil {
-	//	log.Fatal(err)
-	//}
-
-	err := redisPool.Dial("localhost:6379")
+	filesMap, err := parsers.GetZIPLinksFromURL(*url)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fileName := "1472752689118.zip"
-	util.Unzip(fileName, strings.Replace(fileName, ".", "_", -1))
-	processXMLs("1472752689118_zip")
+	err = redisPool.Dial(*redisAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer redisPool.Close()
 
+	conn, err := redisPool.Acquire()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if conn == nil {
+		log.Fatal("Connection to Redis Failed")
+	}
+
+	filesMap, err = util.FilterMap(conn, PROC_ZIPS, filesMap)
+	redisPool.Release(conn)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for name, url := range filesMap {
+		wg.Add(1)
+		go func(name, url string) {
+			if err := downloadAndProcessFile(name, url); err != nil {
+				log.Println(err)
+			}
+			wg.Done()
+		}(name, url)
+	}
+
+	wg.Wait()
+	log.Println("All done")
 }
 
-func downloadAndProcessFile(url, fileName string) error {
-	fileOut, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+func downloadAndProcessFile(fileName, url string) error {
+	log.Println("Downnloading zip", fileName)
+	filePath := fmt.Sprintf("%s/%s", "/tmp", fileName)
+	fileOut, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		return err
 	}
 
 	defer fileOut.Close()
 
-	fmt.Println("Downnloading file ", fileName)
 	res, err := http.Get(url)
 	if res != nil {
 		defer res.Body.Close()
@@ -69,55 +96,75 @@ func downloadAndProcessFile(url, fileName string) error {
 		return err
 	}
 
+	dir := strings.Replace(filePath, ".", "_", -1)
+	if err := util.Unzip(filePath, dir); err != nil {
+		return err
+	}
+
+	if err := processXMLs(dir, fileName); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func processXMLs(dir string) error {
+func processXMLs(dir, name string) error {
+	var fileMap = make(map[string]string, 0)
 	err := filepath.Walk(dir, func(path string, f os.FileInfo, err error) error {
-		return uploadToRedis(path)
+		if !f.IsDir() {
+			fileMap[f.Name()] = path
+			return nil
+		}
+		return nil
 	})
 
 	if err != nil {
 		return err
 	}
 
-	return nil
+	conn, err := redisPool.Acquire()
+	if err != nil {
+		return err
+	}
+
+	if conn == nil {
+		return errors.New("Connection to Redis Failed")
+	}
+
+	defer redisPool.Release(conn)
+
+	fileMap, err = util.FilterMap(conn, name, fileMap)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range fileMap {
+		err := uploadToRedis(conn, dir, file)
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err = gore.NewCommand("RPUSH", PROC_ZIPS, name).Run(conn)
+
+	return err
 }
 
-func uploadToRedis(filePath string) error {
+func uploadToRedis(conn *gore.Conn, dir, filePath string) error {
 	dataFile, err := os.OpenFile(filePath, os.O_RDONLY, 0666)
 	if err != nil {
 		return err
 	}
-
 	defer dataFile.Close()
 
 	dataBytes, err := ioutil.ReadAll(dataFile)
-
-	data := string(dataBytes)
-
-	fmt.Println(data)
-	return nil
-}
-
-func filterList(conn gore.Conn, key string, fullList []string) ([]string, error) {
-	reply, err := gore.NewCommand("lrange", key, "0 -1").Run(conn)
+	_, err = gore.NewCommand("RPUSH", NEWS_LIST, string(dataBytes)).Run(conn)
 	if err != nil {
 		return err
 	}
 
-	finishedList := []string{}
-	reply.Slice(&finishedList)
-
-	for _, finishedFile := range finishedList {
-		for i, queueFile := range fullList {
-			if queueFile == finishedFile {
-				fullList = append(fullList[:i], fullList[i+1:]...)
-				continue
-			}
-		}
-
-	}
-
-	return fullList
+	splitData := strings.Split(filePath, "/")
+	fileName := splitData[len(splitData)-1]
+	_, err = gore.NewCommand("RPUSH", dir, fileName).Run(conn)
+	return err
 }
