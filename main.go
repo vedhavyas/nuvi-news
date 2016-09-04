@@ -3,9 +3,19 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+
+	"strings"
+
+	"github.com/keimoon/gore"
+	"github.com/vedhavyas/nuvi-news/util"
 )
+
+var redisPool gore.Pool
 
 func main() {
 	//url := "http://bitly.com/nuvi-plz"
@@ -26,8 +36,15 @@ func main() {
 	//	log.Fatal(err)
 	//}
 
-	//fileName := "1472752689118.zip"
-	//util.Unzip(fileName, strings.Replace(fileName, ".", "_", -1))
+	err := redisPool.Dial("localhost:6379")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fileName := "1472752689118.zip"
+	util.Unzip(fileName, strings.Replace(fileName, ".", "_", -1))
+	processXMLs("1472752689118_zip")
+
 }
 
 func downloadAndProcessFile(url, fileName string) error {
@@ -55,11 +72,52 @@ func downloadAndProcessFile(url, fileName string) error {
 	return nil
 }
 
-func processXMLs(dir string) {
+func processXMLs(dir string) error {
+	err := filepath.Walk(dir, func(path string, f os.FileInfo, err error) error {
+		return uploadToRedis(path)
+	})
 
-	dir, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
 
+	return nil
+}
+
+func uploadToRedis(filePath string) error {
+	dataFile, err := os.OpenFile(filePath, os.O_RDONLY, 0666)
+	if err != nil {
+		return err
+	}
+
+	defer dataFile.Close()
+
+	dataBytes, err := ioutil.ReadAll(dataFile)
+
+	data := string(dataBytes)
+
+	fmt.Println(data)
+	return nil
+}
+
+func filterList(conn gore.Conn, key string, fullList []string) ([]string, error) {
+	reply, err := gore.NewCommand("lrange", key, "0 -1").Run(conn)
+	if err != nil {
+		return err
+	}
+
+	finishedList := []string{}
+	reply.Slice(&finishedList)
+
+	for _, finishedFile := range finishedList {
+		for i, queueFile := range fullList {
+			if queueFile == finishedFile {
+				fullList = append(fullList[:i], fullList[i+1:]...)
+				continue
+			}
+		}
+
+	}
+
+	return fullList
 }
